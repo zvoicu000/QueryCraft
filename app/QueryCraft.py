@@ -557,3 +557,178 @@ def display_summary_statistics(df: pd.DataFrame) -> None:
             st.plotly_chart(heat_fig, use_container_width=True)
         else:
             st.info("Not enough numeric solumns for correlation analysis.")
+
+def perform_advanced_analysis(df: pd.DataFrame) -> None:
+    """Perform advanced statistical analysis on the dataset."""
+    st.markdown("## 📊 Advanced Statistical Analysis")
+
+    tabs= st.tabs(["Distribution Analysis", "Outlier Detection", "Time Series Analysis", "Feature Relationships"])
+
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    datetime_cols = df.select_dtypes(include=['datetime64']).columns
+
+    with tabs[0]:
+        st.markdown("### 📈 Distribution Analysis")
+        if len(numeric_cols) > 0:
+            col= st.selectbox("Select column for distribution analysis", numeric_cols)
+
+            skewness = stats.skew(df[col].dropna())
+            kurtosis = stats.kurtosis(df[col].dropna())
+
+            fig = ff.create_distplot([df[col].dropna()],[col],bin_size=0.2)
+            st.plotly_chart(fig, use_container_width=True)
+
+            col1,col2,col3=st.columns(3)
+            col1.metric("Skewness", f"{skewness:.2f}")
+            col2.metric("Kurtosis", f"{kurtosis:.2f}")
+            col3.metric("Normality Test p-value",f"{stats.normaltest(df[col].dropna())[1]:.4f}")
+    
+    with tabs[1]:
+        st.markdown("### 🔍 Outlier Detection")
+        if len(numeric_cols) >0:
+            col=st.selectbox("Select column for outlier detection", numeric_cols, key="outlier_col")
+
+            Q1 = df[col].quantile(0.25)
+            Q3=df[col].quantile(0.75)
+            IQR = Q3-Q1
+            outliers = df[(df[col]<(Q1 - 1.5 * IQR)) | (df[col]>(Q3 + 1.5 * IQR))][col]
+
+            fig=go.Figure()
+            fig.add_trace(go.Box(y=df[col], name=col))
+            st.plotly_chart(fig, use_container_width=True)
+
+            if not outliers.empty:
+                st.markdown(f"**Found {len(outliers)} outliers:**")
+                st.dataframe(outliers)
+    
+    with tabs[2]:
+        st.markdown("### ⏳ Time Series Analysis")
+        if len(datetime_cols) >0:
+            date_col = st.selectbox("Select date column", datetime_cols)
+            value_col = st.selectbox("Select value column", numeric_cols)
+
+            ts_data = df[[date_col, value_col]].sort_values(date_col)
+            ts_data=ts_data.set_index(date_col)
+
+            period = st.number_input("Enter the period for seasonal decomposition (default is 12)", min_value=1, value=12)
+
+            try:
+                decomposition = seasonal_decompose(ts_data[value_col], period=period)
+
+                fig=go.Figure()
+                fig.add_trace(go.Scatter(x=ts_data.index, y=decomposition.trend,name='Trend'))
+                fig.add_trace(go.Scatter(x=ts_data.index,y=decomposition.seasonal,name='Seasonal'))
+                fig.add_trace(go.Scatter(x=ts_data.index,y=decomposition.resid,name='Residual'))
+                fig.update_layout(title='Time Series Decomposition')
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.warning("Could not perform seasonal decomposition. Ensure enough data points and regular intervals.")
+    
+    with tabs[3]:
+        st.markdown("### 🔗 Feature Relationships")
+        if len(numeric_cols) >=2:
+            correlation = df[numeric_cols].corr()
+
+            fig = px.imshow(correlation,
+                            labels=dict(color="Correlation"),
+                            title="Feature Correlation Matrix")
+            st.plotly_chart(fig, use_container_width=True)
+
+            if st.checkbox("Show Variance Inflation Factor (VIF) Analysis"):
+                if len(numeric_cols) < 2:
+                    st.warning("At least two numeric columns are required to calculate VIF.")
+                else:
+                    try:
+                        X=df[numeric_cols].dropna()
+                        vif_data=pd.DataFrame()
+                        vif_data["Feature"]=numeric_cols
+                        vif_data["VIF"]=[variance_inflation_factor(X.values, i)
+                                         for i in range(X.shape[1])]
+                        st.dataframe(vif_data.sort_values('VIF', ascending=False))
+                    except Exception as e:
+                        st.warning("Could not calculate VIF. Check for multicollinearity or missing values.")
+
+def assess_data_quality(df: pd.DataFrame) -> None:
+    """Assess the quality of the dataset and provide detailed insights."""
+    st.markdown("## 🔍 Data Quality Assessment")
+
+    tabs= st.tabs(["Overview", "Missing Values", "Duplicates", "Consistency", "Anomalies"])
+
+    with tabs[0]:
+        st.markdown("### 📊 Data Quality Overview")
+
+        total_rows = len(df)
+        total_cols = len(df.columns)
+        memory_usage=df.memory_usage(deep=True).sum() /1024**2
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total Rows", f"{total_rows:,}")
+        col2.metric("Total Columns", total_cols)
+        col3.metric("Memory Usage", f"{memory_usage:.2f} MB")
+        col4.metric("Data Types", len(df.dtypes.unique()))
+
+        dtype_counts=df.dtypes.value_counts()
+        fig = px.pie(values=dtype_counts.values,
+                     names=dtype_counts.index.astype(str),
+                     title="Column Data Type Distribution")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tabs[1]:
+        st.markdown("### ❌ Missing Values Analysis")
+
+        missing = df.isnull().sum()
+        missing__pct=(missing/len(df)*100).round(2)
+        missing_df=pd.DataFrame({
+            'Column': missing.index,
+            'Missing Count':missing.values,
+            'Missing Percentage':missing__pct.values
+        }).sort_values("Missing Percentage", ascending=False)
+
+        if missing_df['Missing Count'].sum()>0:
+            st.dataframe(missing_df)
+
+            fig=px.bar(missing_df,
+                       x='Column',
+                       y='Missing Percentage',
+                       title="Missing Values by Column")
+            st.plotly_chart(fig, use_container_width=True)
+
+            if st.checkbox("Show Missing Value Patterns"):
+                fig=go.Figure()
+                for col in df.columns:
+                    fig.add_trace(go.Scatter(
+                        x=df.index[df[col].isnull()],
+                        y=[col] * df[col].isnull().sum(),
+                        mode='markers',
+                        name=col 
+                    ))
+                fig.update_layout(title="Missing Value Patterns Across Records")
+                st.plotly_chart(fig, use_container_width=True)
+        
+        else:
+            st.success("No missing values found in the dataset!")
+    
+    with tabs[2]:
+        st.markdown("### 🔄 Duplicate Analysis")
+
+        duplicates = df.duplicated()
+        duplicate_count = duplicates.sum()
+
+        if duplicate_count>0:
+            st.warning(f"Found {duplicate_count} duplicate rows ({(duplicate_count/len(df)*100):.2f}% of data)")
+
+            if st.checkbox("Show Duplicate Rows"):
+                st.dataframe(df[duplicates])
+
+            col_duplicates={col:df[col].duplicated().sum() for col in df.columns}
+            col_dup_df = pd.DataFrame({
+                'Column' : col_duplicates.keys(),
+                'Duplicate Count': col_duplicates.values(),
+                'Duplicate Percentage': [v/len(df)*100 for v in col_duplicates.values()]
+            }).sort_values('Duplicate Count', ascending=False)
+
+            st.markdown("### Column-wise Duplicates")
+            st.dataframe(col_dup_df)
+        else:
+            st.success("No duplicate rows found in the dataset!")
+                       
