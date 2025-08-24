@@ -1,9 +1,9 @@
 # QueryCraft
 
-QueryCraft is a powerful Streamlit-based data exploration and visualization tool that leverages LLMs (Large Language Models) to help users generate, validate, and analyze SQL queries on SQLite and PostgreSQL databases. It provides interactive charts, advanced statistics, and data quality assessments, all in a modern, user-friendly interface.
+QueryCraft is a powerful Streamlit-based data exploration and visualization tool that leverages LLMs (Large Language Models) including Azure OpenAI and Google Gemini to help users generate, validate, and analyze SQL queries on SQLite and PostgreSQL databases. It provides interactive charts, advanced statistics, and data quality assessments, all in a modern, user-friendly interface.
 
 ## Features
-- **LLM-powered SQL generation**: Generate and validate SQL queries using AI.
+- **LLM-powered SQL generation**: Generate and validate SQL queries using AI (Azure OpenAI & Gemini integration).
 - **Supports SQLite and PostgreSQL**: Connect, explore, and query your databases.
 - **Interactive data visualization**: Create bar charts, line charts, scatter plots, histograms, pie charts, and more.
 - **Advanced analysis**: Perform statistical analysis, outlier detection, time series decomposition, and feature relationships.
@@ -38,7 +38,20 @@ QueryCraft is a powerful Streamlit-based data exploration and visualization tool
    ```
 
 ### Configuration
-1. Create a `.env` file in the project root and add your API keys and model deployment names for Azure OpenAI and Gemini (see example in `.env`).
+1. Create a `.env` file in the project root and add your API keys and model deployment names for Azure OpenAI and Gemini. Example:
+
+   ```env
+   # Azure OpenAI Configuration
+   LLM_PROVIDER=AZURE
+   OPENAI_ENDPOINT="https://<your-endpoint>.openai.azure.com"
+   OPENAI_API_VERSION="2024-08-01-preview"
+   OPENAI_API_KEY="<your-azure-openai-api-key>"
+   MODEL_NAME="<your-azure-openai-deployment-name>"
+
+   # Gemini Configuration
+   LLM_PROVIDER=GEMINI
+   GEMINI_API_KEY="<your-gemini-api-key>"
+   ```
 2. Launch the app:
    ```bash
    streamlit run app/QueryCraft.py
