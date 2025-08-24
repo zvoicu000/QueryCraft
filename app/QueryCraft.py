@@ -731,4 +731,611 @@ def assess_data_quality(df: pd.DataFrame) -> None:
             st.dataframe(col_dup_df)
         else:
             st.success("No duplicate rows found in the dataset!")
+
+    with tabs[3]:
+        st.markdown("### 📏 Data Consistency Checks")
+
+        consistency_issues = []
+
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        for col in numeric_cols:
+            q1 = df[col].quantile(0.25)
+            q3 = df[col].quantile(0.75)
+            iqr = q3 - q1
+            lower_bound = q1 - 3 * iqr
+            upper_bound = q3 + 3 * iqr
+            outliers = df[(df[col] < lower_bound) | (df[col] > upper_bound)][col]
+
+            if len(outliers) > 0:
+                consistency_issues.append({
+                    'Column': col,
+                    'Issue': 'Extreme Values',
+                    'Count': len(outliers),
+                    'Details': f"Values outside range [{lower_bound:.2f}, {upper_bound:.2f}]"
+                })
+
+        string_cols = df.select_dtypes(include=['object']).columns
+        for col in string_cols:
+            if df[col].str.isupper().any() and df[col].str.islower().any():
+                consistency_issues.append({
+                    'Column': col,
+                    'Issue': 'Mixed Case',
+                    'Count': len(df[col].unique()),
+                    'Details': 'Contains both upper and lower case values'
+                })
+
+            numeric_conversion = pd.to_numeric(df[col], errors='coerce')
+            if numeric_conversion.isnull().any() and not numeric_conversion.notnull().all():
+                consistency_issues.append({
+                    'Column': col,
+                    'Issue': 'Mixed Types',
+                    'Count': len(df[col].unique()),
+                    'Details': 'Contains non-numeric values'
+                })
+
+        if consistency_issues:
+            st.dataframe(pd.DataFrame(consistency_issues))
+        else:
+            st.success("No major consistency issues found!")
+
+    with tabs[4]:
+        st.markdown("### 🎯 Anomaly Detection")
+
+        if len(numeric_cols) > 0:
+            col = st.selectbox("Select column for anomaly detection", numeric_cols, key="anomaly_col")
+
+            z_scores = np.abs(stats.zscore(df[col].dropna()))
+            anomalies = df[col][z_scores > 3]
+
+            if not anomalies.empty:
+                st.warning(f"Found {len(anomalies)} potential anomalies using Z-score method")
+
+                fig = go.Figure()
+                fig.add_trace(go.Box(y=df[col], name=col))
+                fig.add_trace(go.Scatter(
+                    x=[0]*len(anomalies),
+                    y=anomalies,
+                    mode='markers',
+                    name='Anomalies',
+                    marker=dict(color='red', size=10)
+                ))
+                st.plotly_chart(fig, use_container_width=True)
+
+                st.dataframe(anomalies)
+            else:
+                st.success("No significant anomalies detected!")
+
+def handle_query_response(response: dict, db_name: str, db_type: str, host: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None) -> None:
+    """Process LLM-generated SQL query, display results, and handle visualizations."""
+    try:
+        query = response.get('query', '')
+        error = response.get('error', '')
+        decision_log = response.get('decision_log', {})
+        visualization_recommendation = response.get('visualization_recommendation', None)
+
+        if error:
+            detailed_error = generate_detailed_error_message(error)
+            st.error(f"Error generating SQL query: {detailed_error}")
+            return
+
+        if not query:
+            st.warning("No query generated. Please refine your message.")
+            return
+
+        st.success("SQL Query generated successfully!")
+        colored_header("SQL Query and Summary", color_name="blue-70", description="")
+        st.code(query, language="sql")
+
+        if decision_log:
+            with st.expander("Decision Log", expanded=False):
+                display_decision_log_widgets(decision_log)
+
+        if db_type.lower() == 'postgresql':
+            with DB_Config.get_connection(db_name, db_type, host, user, password) as conn:
+                if conn:
+                    try:
+                        cur = conn.cursor()
+                        cur.execute(f"EXPLAIN ANALYZE {query}")
+                        plan = "\n".join(row[0] for row in cur.fetchall())
+                        with st.expander("Query Optimization Hints", expanded=True):
+                            st.markdown("### Execution Plan (EXPLAIN ANALYZE)")
+                            st.code(plan, language="sql")
+                            if "Seq Scan" in plan:
+                                st.warning("The plan shows a sequential scan. Consider adding indexes on frequently queried columns.")
+                    except Exception as ex:
+                        st.error("Failed to run EXPLAIN ANALYZE.")
+                        logger.exception(f"EXPLAIN ANALYZE failed: {ex}")
+
+        start_time = time()
+        sql_results = get_data(query, db_name, db_type, host, user, password)
+        execution_time = time() - start_time
+
+        if sql_results.empty:
+            no_result_reason = "The query executed successfully but did not match any records in the database."
+            if 'no valid SQL query generated' in decision_log.get("execution_feedback", []):
+                no_result_reason = "The query was not generated due to insufficient or ambiguous input."
+            elif 'SQL query validation failed' in decision_log.get("execution_feedback", []):
+                no_result_reason = "The query failed validation checks and was not executed."
+            st.warning(f"The query returned no results because: {no_result_reason}")
+            return
+
+        if sql_results.columns.duplicated().any():
+            st.error("The query returned a DataFrame with duplicate column names. Please modify your query to avoid this.")
+            return
+
+        for col in sql_results.select_dtypes(include=['object']):
+            try:
+                sql_results[col] = pd.to_datetime(sql_results[col], format='%Y-%m-%d %H:%M:%S')
+            except (ValueError, TypeError):
+                pass
+
+        if sql_results.shape[0] > 10000:
+            sample_choice = st.checkbox("Large dataset detected. Sample data for visualization?", value=True)
+            if sample_choice:
+                sql_results = sql_results.sample(10000)
+                st.info("Data has been sampled to 10,000 rows for visualization.")
+
+        colored_header("Query Results and Filter", color_name="blue-70", description="")
+        filtered_results = dataframe_explorer(sql_results, case=False)
+        st.dataframe(filtered_results, use_container_width=True, height=600)
+
+        colored_header("Summary Statistics", color_name="blue-70", description="")
+        display_summary_statistics(filtered_results)
+
+        colored_header("Advanced Analysis", color_name="blue-70", description="")
+        perform_advanced_analysis(filtered_results)
+
+        colored_header("Data Quality Assessment", color_name="blue-70", description="")
+        assess_data_quality(filtered_results)
+
+        performance_metrics = analyze_query_performance(
+            query,
+            execution_time,
+            len(sql_results)
+        )
+
+        with st.expander("🔍 Query Performance Analysis", expanded=True):
+            st.markdown("### Performance Metrics")
+
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Execution Time", f"{performance_metrics['execution_time']:.3f}s")
+            with col2:
+                st.metric("Rows Returned", performance_metrics['rows_returned'])
+            with col3:
+                st.metric("Rows/Second", f"{performance_metrics['rows_per_second']:.0f}")
+            with col4:
+                st.metric("Performance", performance_metrics['performance_class'])
+
+            if performance_metrics['suggestions']:
+                st.markdown("### Optimization Suggestions")
+                for suggestion in performance_metrics['suggestions']:
+                    if suggestion['type'] == 'error':
+                        st.error(suggestion['message'])
+                    elif suggestion['type'] == 'warning':
+                        st.warning(suggestion['message'])
+                    else:
+                        st.info(suggestion['message'])
+
+        colored_header("Visualization Section", color_name="blue-70", description="")
+
+        if len(filtered_results.columns) >= 2:
+            with st.sidebar.expander("📊 Visualization Options", expanded=True):
+                numerical_cols = filtered_results.select_dtypes(include=[np.number]).columns.tolist()
+                categorical_cols = filtered_results.select_dtypes(include=['object', 'category']).columns.tolist()
+
+                suggested_x = numerical_cols[0] if numerical_cols else filtered_results.columns[0]
+                suggested_y = numerical_cols[1] if len(numerical_cols) > 1 else (filtered_results.columns[1] if len(filtered_results.columns) > 1 else filtered_results.columns[0])
+
+                x_options = [f"{col} ⭐" if col == suggested_x else col for col in filtered_results.columns]
+                y_options = [f"{col} ⭐" if col == suggested_y else col for col in filtered_results.columns]
+
+                x_col = st.selectbox("Select X-axis Column", options=x_options, index=x_options.index(f"{suggested_x} ⭐") if f"{suggested_x} ⭐" in x_options else 0, key="x_axis")
+                y_col = st.selectbox("Select Y-axis Column", options=y_options, index=y_options.index(f"{suggested_y} ⭐") if f"{suggested_y} ⭐" in y_options else 0, key="y_axis")
+                x_col_clean = x_col.replace(" ⭐", "")
+                y_col_clean = y_col.replace(" ⭐", "")
+
+                chart_type_options = ["None", "Bar Chart", "Line Chart", "Scatter Plot", "Area Chart", "Histogram", "Pie Chart", "Box Plot"]
+                suggested_chart_type = visualization_recommendation if visualization_recommendation in chart_type_options else ("Bar Chart" if numerical_cols else "None")
+                chart_type_display = [f"{chart} ⭐" if chart == suggested_chart_type else chart for chart in chart_type_options]
+
+                try:
+                    default_chart_index = chart_type_display.index(f"{suggested_chart_type} ⭐")
+                except ValueError:
+                    default_chart_index = 0
+
+                chart_type = st.selectbox(
+                    "Select Chart Type",
+                    options=chart_type_display,
+                    index=default_chart_index,
+                    help=f"Recommended Chart Type: {suggested_chart_type}",
+                    key="chart_type"
+                )
+                chart_type_clean = chart_type.replace(" ⭐", "")
+
+            if chart_type_clean != "None" and x_col_clean and y_col_clean:
+                chart = create_chart(filtered_results, chart_type_clean, x_col_clean, y_col_clean)
+                if chart:
+                    st.plotly_chart(chart, use_container_width=True)
+
+        export_format = st.selectbox("Select Export Format", options=["CSV", "Excel", "JSON"], key="export_format")
+        export_results(filtered_results, export_format)
+
+        if "query_history" not in st.session_state:
+            st.session_state.query_history = []
+            st.session_state.query_timestamps = []
+
+        st.session_state.query_history.append(query)
+        st.session_state.query_timestamps.append(pd.Timestamp.now())
+
+    except Exception as e:
+        detailed_error = generate_detailed_error_message(str(e))
+        st.error(f"An unexpected error occurred: {detailed_error}")
+        logger.exception(f"Unexpected error: {e}")
+
+def export_results(sql_results: pd.DataFrame, export_format: str) -> None:
+    """Allow the user to download query results in CSV, Excel, or JSON format."""
+    if export_format == "CSV":
+        st.download_button(
+            label="📥 Download Results as CSV",
+            data=sql_results.to_csv(index=False),
+            file_name='query_results.csv',
+            mime='text/csv'
+        )
+    elif export_format == "Excel":
+        excel_buffer = io.BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+            sql_results.to_excel(writer, index=False, sheet_name='Sheet1')
+        excel_buffer.seek(0)
+        st.download_button(
+            label="📥 Download Results as Excel",
+            data=excel_buffer,
+            file_name='query_results.xlsx',
+            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+    elif export_format == "JSON":
+        st.download_button(
+            label="📥 Download Results as JSON",
+            data=sql_results.to_json(orient='records'),
+            file_name='query_results.json',
+            mime='application/json'
+        )
+    else:
+        st.error("⚠️ Selected export format is not supported.")
+
+def analyze_dataframe_for_visualization(df: pd.DataFrame) -> list:
+    """Propose suitable chart types based on numeric and categorical column analysis."""
+    suggestions = set()
+    numerical_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+
+    logger.debug(f"Numerical Columns: {numerical_cols}")
+    logger.debug(f"Categorical Columns: {categorical_cols}")
+
+    if len(numerical_cols) == 1:
+        suggestions.update(["Histogram", "Box Plot"])
+    if len(categorical_cols) == 1:
+        suggestions.update(["Bar Chart", "Pie Chart"])
+
+    if len(numerical_cols) >= 2:
+        suggestions.update(["Scatter Plot", "Line Chart"])
+    elif len(numerical_cols) == 1 and len(categorical_cols) == 1:
+        suggestions.update(["Bar Chart"])
+
+    if len(numerical_cols) > 2:
+        suggestions.add("Scatter Plot")
+
+    time_cols = [col for col in df.columns if 'date' in col.lower() or 'time' in col.lower()]
+    if time_cols:
+        suggestions.add("Line Chart")
+
+    ordered_suggestions = [chart for chart in SUPPORTED_CHART_TYPES.keys() if chart in suggestions]
+    logger.debug(f"Ordered Suggestions: {ordered_suggestions}")
+    return ordered_suggestions
+
+def generate_detailed_error_message(error_message: str) -> str:
+    """Use the LLM to produce a user-friendly explanation of any encountered error."""
+    prompt = f"Provide a detailed and user-friendly explanation for the following error message:\n\n{error_message}"
+    detailed_error = get_completion_from_messages(SYSTEM_MESSAGE, prompt)
+    return detailed_error.strip() if detailed_error else error_message
+
+def display_decision_log_widgets(decision_log: Dict) -> None:
+    """
+    Display the complete decision log with enhanced visual organization and styling.
+    Each section of the decision log is displayed in its own tab with appropriate formatting
+    and visual hierarchy. Only shows tabs that have data.
+    """
+    st.markdown("""
+        <style>
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 8px;
+        }
+        .stTabs [data-baseweb="tab"] {
+            padding: 8px 16px;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+    tab_data = [
+        ("Input Analysis", bool(decision_log.get("query_input_details") or decision_log.get("preprocessing_steps"))),
+        ("Paths", bool(decision_log.get("path_identification"))),
+        ("Ambiguities", bool(decision_log.get("ambiguity_detection"))),
+        ("Resolution", bool(decision_log.get("resolution_criteria"))),
+        ("Selected Path", bool(decision_log.get("chosen_path_explanation"))),
+        ("SQL Query", bool(decision_log.get("generated_sql_query"))),
+        ("Alternatives", bool(decision_log.get("alternative_paths"))),
+        ("Feedback", bool(decision_log.get("execution_feedback"))),
+        ("Summary", bool(decision_log.get("final_summary") or decision_log.get("visualization_suggestion")))
+    ]
+
+    available_tabs = [tab for tab, has_data in tab_data if has_data]
+
+    if not available_tabs:
+        st.info("No decision log data available.")
+        return
+
+    tabs = st.tabs(available_tabs)
+
+    tab_indices = {name: idx for idx, name in enumerate(available_tabs)}
+
+    if "Input Analysis" in tab_indices:
+        with tabs[tab_indices["Input Analysis"]]:
+            st.markdown("### Query Input Details")
+            for detail in decision_log.get("query_input_details", []):
+                st.info(detail)
+
+            if preprocessing_steps := decision_log.get("preprocessing_steps"):
+                st.markdown("### Preprocessing Steps")
+                for step in preprocessing_steps:
+                    st.markdown(f"```\n{step}\n```")
+
+    if "Paths" in tab_indices:
+        with tabs[tab_indices["Paths"]]:
+            st.markdown("### Path Identification")
+            for i, path in enumerate(decision_log.get("path_identification", []), 1):
+                with st.expander(f"Path {i} (Score: {path['score']})", expanded=i == 1):
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.markdown(f"**Description**:")
+                        st.markdown(f"_{path['description']}_")
+                    with col2:
+                        st.metric("Score", path['score'])
+
+                    st.divider()
+
+                    col3, col4 = st.columns(2)
+                    with col3:
+                        st.markdown("**Tables**")
+                        for table in path['tables']:
+                            st.markdown(f"- `{table}`")
+                    with col4:
+                        st.markdown("**Columns**")
+                        for cols in path['columns']:
+                            st.markdown(f"- `{', '.join(cols)}`")
+
+    if "Ambiguities" in tab_indices:
+        with tabs[tab_indices["Ambiguities"]]:
+            st.markdown("### Ambiguity Analysis")
+            if ambiguities := decision_log.get("ambiguity_detection"):
+                for ambiguity in ambiguities:
+                    st.warning(ambiguity)
+
+    if "Resolution" in tab_indices:
+        with tabs[tab_indices["Resolution"]]:
+            st.markdown("### Resolution Criteria")
+            if criteria := decision_log.get("resolution_criteria"):
+                for i, criterion in enumerate(criteria, 1):
+                    st.markdown(f"**{i}.** {criterion}")
+                    st.divider()
+
+    if "Selected Path" in tab_indices:
+        with tabs[tab_indices["Selected Path"]]:
+            st.markdown("### Selected Tables and Columns")
+            if chosen_path := decision_log.get("chosen_path_explanation"):
+                for item in chosen_path:
+                    with st.expander(f"{item['table']}", expanded=True):
+                        st.markdown("#### Selected Columns:")
+                        cols = st.columns(min(3, len(item['columns'])))
+                        for i, col in enumerate(item['columns']):
+                            with cols[i % len(cols)]:
+                                st.code(col)
+
+                        st.markdown("#### Selection Rationale:")
+                        st.info(item['reason'])
+
+    if "SQL Query" in tab_indices:
+        with tabs[tab_indices["SQL Query"]]:
+            st.markdown("### Generated SQL Query")
+            if sql_query := decision_log.get("generated_sql_query"):
+                st.code(sql_query, language="sql")
+                if st.button("Copy Query"):
+                    st.write("Query copied to clipboard!")
+                    st.session_state['clipboard'] = sql_query
+
+    if "Alternatives" in tab_indices:
+        with tabs[tab_indices["Alternatives"]]:
+            st.markdown("### Alternative Approaches")
+            if alternatives := decision_log.get("alternative_paths"):
+                for i, alt in enumerate(alternatives, 1):
+                    with st.expander(f"Alternative {i}", expanded=False):
+                        st.markdown(alt)
+
+    if "Feedback" in tab_indices:
+        with tabs[tab_indices["Feedback"]]:
+            st.markdown("### Execution Feedback")
+            if feedback := decision_log.get("execution_feedback"):
+                for item in feedback:
+                    if "error" in item.lower():
+                        st.error(item)
+                    elif "warning" in item.lower():
+                        st.warning(item)
+                    else:
+                        st.success(item)
+
+    if "Summary" in tab_indices:
+        with tabs[tab_indices["Summary"]]:
+            st.markdown("### Analysis Summary")
+            if summary := decision_log.get("final_summary"):
+                st.markdown(f"**Key Findings:**")
+                st.markdown(f"_{summary}_")
+
+                if viz_suggestion := decision_log.get("visualization_suggestion"):
+                    st.divider()
+                    st.markdown("### Visualization Recommendation")
+                    st.success(f"Suggested visualization type: **{viz_suggestion}**")
+                    st.markdown("_This chart type was selected based on the data structure and analysis goals._")
+
+def analyze_query_performance(query: str, execution_time: float, row_count: int) -> dict:
+    """Analyze query performance and suggest optimizations."""
+    performance_metrics = {
+        "execution_time": execution_time,
+        "rows_returned": row_count,
+        "rows_per_second": row_count / execution_time if execution_time > 0 else 0,
+        "suggestions": []
+    }
+
+    if execution_time < 0.1:
+        performance_metrics["performance_class"] = "Excellent"
+    elif execution_time < 0.5:
+        performance_metrics["performance_class"] = "Good"
+    elif execution_time < 2.0:
+        performance_metrics["performance_class"] = "Fair"
+    else:
+        performance_metrics["performance_class"] = "Poor"
+        performance_metrics["suggestions"].append({
+            "type": "warning",
+            "message": f"Query execution time ({execution_time:.2f}s) is high"
+        })
+
+    return performance_metrics
+
+db_type = st.sidebar.selectbox("Select Database Type 🗄️", options=["SQLite", "PostgreSQL"])
+
+if db_type == "SQLite":
+    uploaded_file = st.sidebar.file_uploader("Upload SQLite Database 📂", type=["db", "sqlite", "sql"])
+
+    if uploaded_file:
+        db_file = save_temp_file(uploaded_file)
+        schemas = DB_Config.get_all_schemas(db_file, db_type='sqlite')
+        table_names = list(schemas.keys())
+
+        if not schemas:
+            st.error("Could not load any schemas please check the database file")
+
+        if table_names:
+            options = ["Select All"] + table_names
+            selected_tables = st.sidebar.multiselect("Select Tables 📋", options=options, key="sqlite_tables")
+            if "Select All" in selected_tables:
+                if len(selected_tables) < len(options):
+                    selected_tables = table_names
+                else:
+                    selected_tables = options
+            selected_tables = [table for table in selected_tables if table != "Select All"]
+            colored_header(f"🔍 Selected Tables: {', '.join(selected_tables)}", color_name="blue-70", description="")
+            if len(selected_tables) > 3:
+
+                    with st.expander("View All Table Schemas 📖", expanded=False):
+                        for table in selected_tables:
+                            with st.expander(f"Schema: {table}", expanded=False):
+                                st.json(schemas[table])
+            else:
+                for table in selected_tables:
+                    with st.expander(f"View Schema: {table} 📖", expanded=False):
+                        st.json(schemas[table])
+
+            user_message = st.text_input(placeholder="Type your SQL query here...", key="user_message", label="Your Query 💬", label_visibility="hidden")
+            if user_message:
+                selected_schemas = {table: schemas[table] for table in selected_tables}
+                logger.debug(f"Schemas being passed to `generate_sql_query`: {selected_schemas}")
+                with st.spinner('🧠 Generating SQL query...'):
+                    response = generate_sql_query(user_message, selected_schemas)
+                handle_query_response(response, db_file, db_type='sqlite')
+
+        else:
+            st.info("📭 No tables found in the database.")
+    else:
+        st.info("📥 Please upload a database file to start.")
+
+elif db_type == "PostgreSQL":
+    with st.sidebar.expander("🔐 PostgreSQL Connection Details", expanded=True):
+        postgres_host = st.text_input("Host 🏠", placeholder="PostgreSQL Host")
+        postgres_db = st.text_input("DB Name 🗄️", placeholder="Database Name")
+        postgres_user = st.text_input("Username 👤", placeholder="Username")
+        postgres_password = st.text_input("Password 🔑", type="password", placeholder="Password")
+
+    if all([postgres_host, postgres_db, postgres_user, postgres_password]):
+        schemas = DB_Config.get_all_schemas(postgres_db, db_type='postgresql', host=postgres_host, user=postgres_user, password=postgres_password)
+        table_names = list(schemas.keys())
+
+        if table_names:
+            options = ["Select All"] + table_names
+            selected_tables = st.sidebar.multiselect("Select Tables 📋", options=options, key="postgresql_tables")
+            if "Select All" in selected_tables:
+                if len(selected_tables) < len(options):
+                    selected_tables = table_names
+                else:
+                    selected_tables = options
+            selected_tables = [table for table in selected_tables if table != "Select All"]
+            colored_header("🔍 Selected Tables:", color_name="blue-70", description="")
+            for table in selected_tables:
+                with st.expander(f"View Schema: {table} 📖", expanded=False):
+                    st.json(schemas[table])
+
+            user_message = st.text_input(placeholder="Type your SQL query here...", key="user_message_pg", label="Your Query 💬", label_visibility="hidden")
+            if user_message:
+                with st.spinner('🧠 Generating SQL query...'):
+                    selected_schemas = {table: schemas[table] for table in selected_tables}
+                    logger.debug(f"Schemas being passed to `generate_sql_query`: {selected_schemas}")
+                    response = generate_sql_query(user_message, selected_schemas)
+                handle_query_response(response, postgres_db, db_type='postgresql', host=postgres_host, user=postgres_user, password=postgres_password)
+        else:
+            st.info("📭 No tables found in the database.")
+    else:
+        st.info("🔒 Please fill in all PostgreSQL connection details to start.")
+
+with st.sidebar.expander(" Query History", expanded=False):
+    if st.session_state.get("query_history"):
+        st.write("### 📝 Saved Queries")
+
+        search_query = st.text_input("Search Queries 🔍", key="search_query")
+        query_history_df = pd.DataFrame({
+            "Query": st.session_state.query_history,
+            "Timestamp": pd.to_datetime(st.session_state.query_timestamps)
+        })
+
+        if search_query:
+            query_history_df = query_history_df[query_history_df['Query'].str.contains(search_query, case=False, na=False)]
+
+        queries_per_page = 5
+        total_queries = len(query_history_df)
+        num_pages = max((total_queries // queries_per_page) + (total_queries % queries_per_page > 0), 1)
+        current_page = st.number_input("Page 📄", min_value=1, max_value=num_pages, value=1)
+
+        start_index = (current_page - 1) * queries_per_page
+        end_index = start_index + queries_per_page
+        page_queries = query_history_df.iloc[start_index:end_index]
+
+        for i, row in page_queries.iterrows():
+            with st.expander(f"🗂️ Query {i + 1}: {row['Timestamp'].strftime('%Y-%m-%d %H:%M:%S')}"):
+                st.write("**SQL Query:**")
+                st.code(row['Query'], language="sql")
+
+                if st.button(f"🔄 Re-run Query {i + 1}", key=f"rerun_query_{i}"):
+                    user_message = row['Query']
+                    with st.spinner('🔄 Re-running the saved SQL query...'):
+                        selected_schemas = {table: schemas[table] for table in selected_tables}
+                        response = generate_sql_query(user_message, selected_schemas)
+                        handle_query_response(
+                            response,
+                            db_file if db_type == "SQLite" else postgres_db,
+                            db_type,
+                            host=postgres_host if db_type == "PostgreSQL" else None,
+                            user=postgres_user if db_type == "PostgreSQL" else None,
+                            password=postgres_password if db_type == "PostgreSQL" else None
+                        )
+
+        st.write(f"Page {current_page} of {num_pages}")
+
+    else:
+        st.info("📭 No query history available.")
                        
