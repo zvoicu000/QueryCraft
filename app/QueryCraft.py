@@ -1,9 +1,9 @@
-import sys 
-import os 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__),"../")))
-import io 
-import json 
-import re 
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
+import io
+import json
+import re
 import logging
 from typing import Dict, List, Optional, Union, TypedDict
 import pandas as pd
@@ -29,6 +29,7 @@ from time import time
 from collections import defaultdict
 from jsonschema import validate as json_validate, ValidationError
 
+# Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
@@ -42,14 +43,15 @@ SUPPORTED_CHART_TYPES = {
     "Box Plot": "A chart that shows the distribution of data based on quartiles."
 }
 
+# Page Configuration with dark theme details
 st.set_page_config(
-    page_icon='📁',
+    page_icon="🗃️",
     page_title="QueryCraft",
     layout="wide"
 )
 
 def apply_custom_theme():
-    custom_css=f"""
+    custom_css = f"""
     <style>
     /* Global Styles */
     body, .stApp {{
@@ -97,6 +99,7 @@ def apply_custom_theme():
     """
     st.markdown(custom_css, unsafe_allow_html=True)
 
+# Apply the custom theme early
 apply_custom_theme()
 
 load_dotenv()
@@ -105,6 +108,8 @@ load_dotenv()
 def load_system_message(schemas: dict) -> str:
     """Load and format the system message with JSON-serialized schemas."""
     return SYSTEM_MESSAGE.format(schemas=json.dumps(schemas, indent=2))
+
+# Add input validation to prevent SQL injection and other security vulnerabilities
 
 def validate_sql_query(query: str) -> bool:
     """
@@ -116,29 +121,30 @@ def validate_sql_query(query: str) -> bool:
     Returns:
     - bool: True if the query is valid and safe, False otherwise.
     """
-    if not isinstance(query,str):
+    if not isinstance(query, str):
         return False
-    
+
     disallowed_keywords = r'\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|EXEC)\b'
 
     if re.search(disallowed_keywords, query, re.IGNORECASE):
         return False
-    
-    if not query.strip().lower().startswith(('select','with')):
+
+    if not query.strip().lower().startswith(('select', 'with')):
         return False
-    
-    if query.count('(')!= query.count(')'):
+
+    if query.count('(') != query.count(')'):
         return False
-    
+
     return True
 
+# --- New helper: Validate that query uses existent tables/columns ---
 def validate_query_tables(query: str, schemas: dict) -> bool:
     """
     Very basic check: warn if any known schema table name is missing in the query.
     This is a heuristic check.
     """
-    lower_query=query.lower()
-    missing=[]
+    lower_query = query.lower()
+    missing = []
     for table in schemas.keys():
         if table.lower() not in lower_query:
             missing.append(table)
@@ -147,32 +153,34 @@ def validate_query_tables(query: str, schemas: dict) -> bool:
         return False
     return True
 
-def get_data(query: str, db_name: str, db_type: str, host: Optional[str]=None, user:Optional[str]= None, password: Optional[str]=None) -> pd.DataFrame:
+def get_data(query: str, db_name: str, db_type: str, host: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None) -> pd.DataFrame:
     """Run the specified query and return the complete resulting DataFrame."""
     if not validate_sql_query(query):
         logger.error("Invalid or unsafe SQL query.")
         return pd.DataFrame()
-    return DB_Config.query_database(query,db_name,db_type,host,user,password)
+    # Removed pagination limit and offset
+    return DB_Config.query_database(query, db_name, db_type, host, user, password)
 
 def save_temp_file(uploaded_file) -> str:
     """Saves an uploaded file to a temporary location."""
-    temp_file_path="temp_database.db"
+    temp_file_path = "temp_database.db"
     with open(temp_file_path, "wb") as f:
         f.write(uploaded_file.read())
     return temp_file_path
 
+# Step 1: Define Type Classes
 class Path(TypedDict):
-    description: str 
+    description: str
     tables: List[str]
     columns: List[List[str]]
-    score: int 
+    score: int
 
 class TableColumn(TypedDict):
-    table: str 
+    table: str
     columns: List[str]
-    reason:str 
+    reason: str
 
-class DecisiondLog(TypedDict):
+class DecisionLog(TypedDict):
     query_input_details: List[str]
     preprocessing_steps: List[str]
     path_identification: List[Path]
@@ -277,31 +285,32 @@ DECISION_LOG_SCHEMA = {
     "required": ["query", "decision_log"]
 }
 
-def generate_sql_query(user_message:str, schemas:dict, max_attempts:int=1) -> dict:
+# Step 3: Implement the Modified generate_sql_query Function
+def generate_sql_query(user_message: str, schemas: dict, max_attempts: int = 1) -> dict:
     """Generate a SQL query using LLM responses and validate output structure."""
-    formatted_system_message=f"""
+    formatted_system_message = f"""
     {load_system_message(schemas)}
-    Important: Your response must be valid JSON matching this schema:
-    {json.dumps(DECISION_LOG_SCHEMA,indent=2)}
 
-    Ensure all reponses strictly follow this format. Include a final_summary and visualization_suggestion in the decision_log.
+    IMPORTANT: Your response must be valid JSON matching this schema:
+    {json.dumps(DECISION_LOG_SCHEMA, indent=2)}
+
+    Ensure all responses strictly follow this format. Include a final_summary and visualization_suggestion in the decision_log.
     """
 
     for attempt in range(max_attempts):
         try:
-            response=get_completion_from_messages(formatted_system_message,user_message)
-
+            response = get_completion_from_messages(formatted_system_message, user_message)
+            # Strip any triple-backtick fences
             response = re.sub(r'^```json\s*', '', response.strip())
             response = re.sub(r'```$', '', response.strip())
-
-            json_response=json.loads(response)
-
+            json_response = json.loads(response)
             try:
                 json_validate(instance=json_response, schema=DECISION_LOG_SCHEMA)
             except ValidationError as ve:
                 logger.warning(f"JSON schema validation error: {ve.message}. Attempt: {attempt + 1}")
                 continue
 
+            # Validate referenced tables in the generated SQL query
             if not validate_query_tables(json_response.get('query', ''), schemas):
                 logger.warning("Generated SQL query contains non-existent tables/columns.")
 
@@ -309,32 +318,33 @@ def generate_sql_query(user_message:str, schemas:dict, max_attempts:int=1) -> di
                 "query": json_response.get('query'),
                 "error": json_response.get('error'),
                 "decision_log": json_response['decision_log'],
-                "visualization_recommendation":json_response['decision_log'].get('visualization_suggestion')   
+                "visualization_recommendation": json_response['decision_log'].get('visualization_suggestion')
             }
-        
+
         except json.JSONDecodeError as e:
-            logger.exception(f"Invalid JSON response: {response}, Error:{e}")
+            logger.exception(f"Invalid JSON response: {response}, Error: {e}")
             continue
         except Exception as e:
             logger.exception(f"Unexpected error: {e}")
             continue
 
     return {
-        "error":"Failed to generate a valid SQL query after multiple attempts.",
-        "decision_log":{
-            "execution_feedback":["Failed to generate a valid response after multiple attempts."],
-            "final_summary":"Query generation failed."
+        "error": "Failed to generate a valid SQL query after multiple attempts.",
+        "decision_log": {
+            "execution_feedback": ["Failed to generate a valid response after multiple attempts."],
+            "final_summary": "Query generation failed."
         }
     }
-            
+
+# Step 4: Implement Response Validation
 def validate_response_structure(response: dict) -> bool:
     """Check if the LLM response follows the expected JSON schema."""
     try:
         if not all(key in response for key in ["query", "decision_log"]):
             return False
-        
-        decision_log=response["decision_log"]
-        required_sections=[
+
+        decision_log = response["decision_log"]
+        required_sections = [
             "query_input_details",
             "preprocessing_steps",
             "path_identification",
@@ -349,32 +359,34 @@ def validate_response_structure(response: dict) -> bool:
 
         if not all(key in decision_log for key in required_sections):
             return False
-        
+
         for path in decision_log["path_identification"]:
-            if not all(key in path for key in ["description","tables","columns","score"]):
+            if not all(key in path for key in ["description", "tables", "columns", "score"]):
                 return False
-        
+
         for explanation in decision_log["chosen_path_explanation"]:
-            if not all(key in explanation for key in ["table","columns","reason"]):
+            if not all(key in explanation for key in ["table", "columns", "reason"]):
                 return False
-            
+
         return True
-    
+
     except Exception as e:
         logger.error(f"Validation error: {e}")
         return False
-    
+
 def build_markdown_decision_log(decision_log: Dict) -> str:
     """Convert the decision log into a markdown-formatted string."""
-    markdown_log=[]
+    markdown_log = []
 
+    # Query Input Details
     if query_details := decision_log.get("query_input_details"):
         markdown_log.extend([
             "### Query Input Analysis",
             "\n".join(f"- {detail}" for detail in query_details),
             ""
         ])
-    
+
+    # Preprocessing Steps
     if preprocessing := decision_log.get("preprocessing_steps"):
         markdown_log.extend([
             "### Preprocessing Steps",
@@ -382,6 +394,7 @@ def build_markdown_decision_log(decision_log: Dict) -> str:
             ""
         ])
 
+    # Path Identification
     if paths := decision_log.get("path_identification"):
         markdown_log.extend([
             "### Path Identification",
@@ -394,14 +407,16 @@ def build_markdown_decision_log(decision_log: Dict) -> str:
             ]),
             ""
         ])
-    
+
+    # Ambiguity Detection
     if ambiguities := decision_log.get("ambiguity_detection"):
         markdown_log.extend([
             "### Ambiguity Analysis",
             "\n".join(f"- {ambiguity}" for ambiguity in ambiguities),
             ""
         ])
-    
+
+    # Resolution Criteria
     if criteria := decision_log.get("resolution_criteria"):
         markdown_log.extend([
             "### Resolution Criteria",
@@ -409,6 +424,7 @@ def build_markdown_decision_log(decision_log: Dict) -> str:
             ""
         ])
 
+    # Chosen Path Explanation
     if chosen_path := decision_log.get("chosen_path_explanation"):
         markdown_log.extend([
             "### Selected Tables and Columns",
@@ -421,20 +437,23 @@ def build_markdown_decision_log(decision_log: Dict) -> str:
             ""
         ])
 
+    # Generated SQL Query
     if sql_query := decision_log.get("generated_sql_query"):
         markdown_log.extend([
             "### Generated SQL Query",
             f"```sql\n{sql_query}\n```",
             ""
         ])
-    
+
+    # Alternative Paths
     if alternatives := decision_log.get("alternative_paths"):
         markdown_log.extend([
             "### Alternative Approaches",
             "\n".join(f"- {alt}" for alt in alternatives),
             ""
         ])
-    
+
+    # Execution Feedback
     if feedback := decision_log.get("execution_feedback"):
         markdown_log.extend([
             "### Execution Feedback",
@@ -442,20 +461,23 @@ def build_markdown_decision_log(decision_log: Dict) -> str:
             ""
         ])
 
+    # Final Summary
     if summary := decision_log.get("final_summary"):
         markdown_log.extend([
             "### Summary",
             summary,
             ""
         ])
-    
+
+    # Visualization Suggestion
     if viz_suggestion := decision_log.get("visualization_suggestion"):
         markdown_log.extend([
-            "### Visualization Recommendation"
-            f"Suggested visualization type:{repr(viz_suggestion)}",
+            "### Visualization Recommendation",
+            f"Suggested visualization type: {repr(viz_suggestion)}",
             ""
         ])
-    
+
+    # Join with proper line breaks and clean up any extra spaces
     return "\n".join(line.rstrip() for line in markdown_log)
 
 def create_chart(df: pd.DataFrame, chart_type: str, x_col: str, y_col: str) -> Optional[any]:
@@ -486,66 +508,77 @@ def create_chart(df: pd.DataFrame, chart_type: str, x_col: str, y_col: str) -> O
         st.error(f"Error generating the chart: {e}")
         logger.error(f"Error generating chart: {e}")
         return None
-    
+
 def display_summary_statistics(df: pd.DataFrame) -> None:
     """Show optimized summary statistics, filtering out unnecessary metrics."""
 
     if df.empty:
         st.warning("The DataFrame is empty. Unable to display summary statistics.")
         return
-    
+
     numeric_cols = df.select_dtypes(include=[np.number]).columns
-    categorical_cols = df.select_dtypes(include=['object','category']).columns
-    datetime_cols=df.select_dtypes(include=['datetime']).columns
+    categorical_cols = df.select_dtypes(include=['object', 'category']).columns
+    datetime_cols = df.select_dtypes(include=['datetime']).columns
 
-    tab1, tab2, tab3 = st.tabs(["Numeric Summary","Categorical Analysis","Missing Data & Correlations"])
+    # Tabs for organized statistics
+    tab1, tab2, tab3 = st.tabs(["Numeric Summary", "Categorical Analysis", "Missing Data & Correlations"])
 
+    # --- NUMERIC SUMMARY ---
     with tab1:
         st.markdown("### Numeric Summary Statistics")
         filtered_stats = df[numeric_cols].describe().T
 
-        filtered_stats=filtered_stats.drop(columns=["count"], errors="ignore")
+        # Drop meaningless statistics
+        filtered_stats = filtered_stats.drop(columns=["count"], errors="ignore")
 
-        filtered_stats["median"]=df[numeric_cols].median()
-        filtered_stats["iqr"]=filtered_stats["75%"] - filtered_stats["25%"]
-        filtered_stats["std"]=df[numeric_cols].std()
+        # Add only necessary statistics
+        filtered_stats["median"] = df[numeric_cols].median()
+        filtered_stats["iqr"] = filtered_stats["75%"] - filtered_stats["25%"]
+        filtered_stats["std"] = df[numeric_cols].std()
 
-        filtered_stats=filtered_stats.loc[filtered_stats["std"]>0]
+        # Filter out columns with no variance (constant values)
+        filtered_stats = filtered_stats.loc[filtered_stats["std"] > 0]
 
-        st.dataframe(filtered_stats.style.format("{:.2f}").highlight_max(axis=0,color="lightgreen"))
-        
+        # Format output
+        st.dataframe(filtered_stats.style.format("{:.2f}").highlight_max(axis=0, color="lightgreen"))
+
+        # Histograms for meaningful distributions
         for col in numeric_cols:
-            if df[col].nunique() >1:
+            if df[col].nunique() > 1:
                 st.markdown(f"**Distribution of {col}**")
-                st.plotly_chart(px.histogram(df, x=col, nbins=30, title=f"Histogram of {col}"),use_container_width=True)
+                st.plotly_chart(px.histogram(df, x=col, nbins=30, title=f"Histogram of {col}"), use_container_width=True)
 
+    # --- CATEGORICAL ANALYSIS ---
     with tab2:
         st.markdown("### Categorical Data Insights")
+
         for col in categorical_cols:
             value_counts = df[col].value_counts()
-            unique_count=value_counts.shape[0]
+            unique_count = value_counts.shape[0]
 
-            if unique_count < len(df) *0.8:
+            # Only show if the column has meaningful variability
+            if unique_count < len(df) * 0.8:
                 st.markdown(f"**{col}:** {unique_count} unique values")
-                freq_table=value_counts.reset_index()
-                freq_table.columns=["Category", "Count"]
-                freq_table["Percentage"] = (freq_table["Count"]/len(df)*100).round(2)
+                freq_table = value_counts.reset_index()
+                freq_table.columns = ["Category", "Count"]
+                freq_table["Percentage"] = (freq_table["Count"] / len(df) * 100).round(2)
                 st.table(freq_table.style.format({"Percentage": "{:.2f}%"}))
-            
-            if unique_count <= 10:
-                st.plotly_chart(px.pie(freq_table, names="Category", values="Count", title=f"Pie Chart for {col}"), use_container_width=True)
-            else:
-                st.plotly_chart(px.bar(freq_table, x="Category", y="Count", title=f"Bar Chart for {col}"), use_container_width=True)
-    
+
+                if unique_count <= 10:
+                    st.plotly_chart(px.pie(freq_table, names="Category", values="Count", title=f"Pie Chart for {col}"), use_container_width=True)
+                else:
+                    st.plotly_chart(px.bar(freq_table, x="Category", y="Count", title=f"Bar Chart for {col}"), use_container_width=True)
+
+    # --- MISSING DATA & CORRELATIONS ---
     with tab3:
         st.markdown("### Missing Data Analysis")
 
-        missing_data=df.isnull().sum()
-        missing_data=missing_data[missing_data > 0]
+        missing_data = df.isnull().sum()
+        missing_data = missing_data[missing_data > 0]
         if not missing_data.empty:
-            missing_df=missing_data.reset_index()
-            missing_df.columns=["Column","Missing Values"]
-            missing_df["Percentage"]=(missing_df["Missing Values"]/len(df)*100).round(2)
+            missing_df = missing_data.reset_index()
+            missing_df.columns = ["Column", "Missing Values"]
+            missing_df["Percentage"] = (missing_df["Missing Values"] / len(df) * 100).round(2)
             st.table(missing_df.style.format({"Percentage": "{:.2f}%"}))
         else:
             st.success("No missing data detected.")
@@ -553,16 +586,17 @@ def display_summary_statistics(df: pd.DataFrame) -> None:
         st.markdown("### Correlation Matrix")
         if len(numeric_cols) >= 2:
             correlation_matrix = df[numeric_cols].corr()
-            heat_fig=px.imshow(correlation_matrix,text_auto=True,aspect="auto",title="Correlation Matrix")
+            heat_fig = px.imshow(correlation_matrix, text_auto=True, aspect="auto", title="Correlation Matrix")
             st.plotly_chart(heat_fig, use_container_width=True)
         else:
-            st.info("Not enough numeric solumns for correlation analysis.")
+            st.info("Not enough numeric columns for correlation analysis.")
 
 def perform_advanced_analysis(df: pd.DataFrame) -> None:
     """Perform advanced statistical analysis on the dataset."""
     st.markdown("## 📊 Advanced Statistical Analysis")
 
-    tabs= st.tabs(["Distribution Analysis", "Outlier Detection", "Time Series Analysis", "Feature Relationships"])
+    # Create tabs for different analyses
+    tabs = st.tabs(["Distribution Analysis", "Outlier Detection", "Time Series Analysis", "Feature Relationships"])
 
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     datetime_cols = df.select_dtypes(include=['datetime64']).columns
@@ -570,79 +604,91 @@ def perform_advanced_analysis(df: pd.DataFrame) -> None:
     with tabs[0]:
         st.markdown("### 📈 Distribution Analysis")
         if len(numeric_cols) > 0:
-            col= st.selectbox("Select column for distribution analysis", numeric_cols)
+            col = st.selectbox("Select column for distribution analysis", numeric_cols)
 
+            # Calculate statistical measures
             skewness = stats.skew(df[col].dropna())
             kurtosis = stats.kurtosis(df[col].dropna())
 
-            fig = ff.create_distplot([df[col].dropna()],[col],bin_size=0.2)
+            # Create distribution plot
+            fig = ff.create_distplot([df[col].dropna()], [col], bin_size=0.2)
             st.plotly_chart(fig, use_container_width=True)
 
-            col1,col2,col3=st.columns(3)
+            # Display statistical measures
+            col1, col2, col3 = st.columns(3)
             col1.metric("Skewness", f"{skewness:.2f}")
             col2.metric("Kurtosis", f"{kurtosis:.2f}")
-            col3.metric("Normality Test p-value",f"{stats.normaltest(df[col].dropna())[1]:.4f}")
-    
+            col3.metric("Normality Test p-value", f"{stats.normaltest(df[col].dropna())[1]:.4f}")
+
     with tabs[1]:
         st.markdown("### 🔍 Outlier Detection")
-        if len(numeric_cols) >0:
-            col=st.selectbox("Select column for outlier detection", numeric_cols, key="outlier_col")
+        if len(numeric_cols) > 0:
+            col = st.selectbox("Select column for outlier detection", numeric_cols, key="outlier_col")
 
+            # Calculate outliers using IQR method
             Q1 = df[col].quantile(0.25)
-            Q3=df[col].quantile(0.75)
-            IQR = Q3-Q1
-            outliers = df[(df[col]<(Q1 - 1.5 * IQR)) | (df[col]>(Q3 + 1.5 * IQR))][col]
+            Q3 = df[col].quantile(0.75)
+            IQR = Q3 - Q1
+            outliers = df[(df[col] < (Q1 - 1.5 * IQR)) | (df[col] > (Q3 + 1.5 * IQR))][col]
 
-            fig=go.Figure()
+            # Create box plot
+            fig = go.Figure()
             fig.add_trace(go.Box(y=df[col], name=col))
             st.plotly_chart(fig, use_container_width=True)
 
             if not outliers.empty:
                 st.markdown(f"**Found {len(outliers)} outliers:**")
                 st.dataframe(outliers)
-    
+
     with tabs[2]:
         st.markdown("### ⏳ Time Series Analysis")
-        if len(datetime_cols) >0:
+        if len(datetime_cols) > 0:
             date_col = st.selectbox("Select date column", datetime_cols)
             value_col = st.selectbox("Select value column", numeric_cols)
 
+            # Ensure data is sorted by date
             ts_data = df[[date_col, value_col]].sort_values(date_col)
-            ts_data=ts_data.set_index(date_col)
+            ts_data = ts_data.set_index(date_col)
 
+            # Automatically detect the period based on the frequency of the date column
             period = st.number_input("Enter the period for seasonal decomposition (default is 12)", min_value=1, value=12)
 
+            # Perform seasonal decomposition
             try:
                 decomposition = seasonal_decompose(ts_data[value_col], period=period)
 
-                fig=go.Figure()
-                fig.add_trace(go.Scatter(x=ts_data.index, y=decomposition.trend,name='Trend'))
-                fig.add_trace(go.Scatter(x=ts_data.index,y=decomposition.seasonal,name='Seasonal'))
-                fig.add_trace(go.Scatter(x=ts_data.index,y=decomposition.resid,name='Residual'))
+                # Plot components
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=ts_data.index, y=decomposition.trend, name='Trend'))
+                fig.add_trace(go.Scatter(x=ts_data.index, y=decomposition.seasonal, name='Seasonal'))
+                fig.add_trace(go.Scatter(x=ts_data.index, y=decomposition.resid, name='Residual'))
                 fig.update_layout(title='Time Series Decomposition')
                 st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
                 st.warning("Could not perform seasonal decomposition. Ensure enough data points and regular intervals.")
-    
+
     with tabs[3]:
         st.markdown("### 🔗 Feature Relationships")
-        if len(numeric_cols) >=2:
+        if len(numeric_cols) >= 2:
+            # Correlation analysis
             correlation = df[numeric_cols].corr()
 
+            # Heatmap
             fig = px.imshow(correlation,
-                            labels=dict(color="Correlation"),
-                            title="Feature Correlation Matrix")
+                          labels=dict(color="Correlation"),
+                          title="Feature Correlation Matrix")
             st.plotly_chart(fig, use_container_width=True)
 
+            # VIF Analysis
             if st.checkbox("Show Variance Inflation Factor (VIF) Analysis"):
                 if len(numeric_cols) < 2:
                     st.warning("At least two numeric columns are required to calculate VIF.")
                 else:
                     try:
-                        X=df[numeric_cols].dropna()
-                        vif_data=pd.DataFrame()
-                        vif_data["Feature"]=numeric_cols
-                        vif_data["VIF"]=[variance_inflation_factor(X.values, i)
+                        X = df[numeric_cols].dropna()
+                        vif_data = pd.DataFrame()
+                        vif_data["Feature"] = numeric_cols
+                        vif_data["VIF"] = [variance_inflation_factor(X.values, i)
                                          for i in range(X.shape[1])]
                         st.dataframe(vif_data.sort_values('VIF', ascending=False))
                     except Exception as e:
@@ -652,77 +698,87 @@ def assess_data_quality(df: pd.DataFrame) -> None:
     """Assess the quality of the dataset and provide detailed insights."""
     st.markdown("## 🔍 Data Quality Assessment")
 
-    tabs= st.tabs(["Overview", "Missing Values", "Duplicates", "Consistency", "Anomalies"])
+    # Create tabs for different quality checks
+    tabs = st.tabs(["Overview", "Missing Values", "Duplicates", "Consistency", "Anomalies"])
 
     with tabs[0]:
         st.markdown("### 📊 Data Quality Overview")
 
+        # Basic statistics
         total_rows = len(df)
         total_cols = len(df.columns)
-        memory_usage=df.memory_usage(deep=True).sum() /1024**2
+        memory_usage = df.memory_usage(deep=True).sum() / 1024**2  # in MB
 
+        # Display metrics
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Total Rows", f"{total_rows:,}")
         col2.metric("Total Columns", total_cols)
         col3.metric("Memory Usage", f"{memory_usage:.2f} MB")
         col4.metric("Data Types", len(df.dtypes.unique()))
 
-        dtype_counts=df.dtypes.value_counts()
+        # Data type distribution
+        dtype_counts = df.dtypes.value_counts()
         fig = px.pie(values=dtype_counts.values,
-                     names=dtype_counts.index.astype(str),
-                     title="Column Data Type Distribution")
+                    names=dtype_counts.index.astype(str),
+                    title="Column Data Type Distribution")
         st.plotly_chart(fig, use_container_width=True)
 
     with tabs[1]:
         st.markdown("### ❌ Missing Values Analysis")
 
+        # Calculate missing values
         missing = df.isnull().sum()
-        missing__pct=(missing/len(df)*100).round(2)
-        missing_df=pd.DataFrame({
+        missing_pct = (missing / len(df) * 100).round(2)
+        missing_df = pd.DataFrame({
             'Column': missing.index,
-            'Missing Count':missing.values,
-            'Missing Percentage':missing__pct.values
-        }).sort_values("Missing Percentage", ascending=False)
+            'Missing Count': missing.values,
+            'Missing Percentage': missing_pct.values
+        }).sort_values('Missing Percentage', ascending=False)
 
-        if missing_df['Missing Count'].sum()>0:
+        # Display missing values
+        if missing_df['Missing Count'].sum() > 0:
             st.dataframe(missing_df)
 
-            fig=px.bar(missing_df,
-                       x='Column',
-                       y='Missing Percentage',
-                       title="Missing Values by Column")
+            # Visualize missing values
+            fig = px.bar(missing_df,
+                        x='Column',
+                        y='Missing Percentage',
+                        title="Missing Values by Column")
             st.plotly_chart(fig, use_container_width=True)
 
+            # Missing patterns
             if st.checkbox("Show Missing Value Patterns"):
-                fig=go.Figure()
+                fig = go.Figure()
                 for col in df.columns:
                     fig.add_trace(go.Scatter(
                         x=df.index[df[col].isnull()],
                         y=[col] * df[col].isnull().sum(),
                         mode='markers',
-                        name=col 
+                        name=col
                     ))
                 fig.update_layout(title="Missing Value Patterns Across Records")
                 st.plotly_chart(fig, use_container_width=True)
-        
         else:
             st.success("No missing values found in the dataset!")
-    
+
     with tabs[2]:
         st.markdown("### 🔄 Duplicate Analysis")
 
+        # Check for duplicate rows
         duplicates = df.duplicated()
         duplicate_count = duplicates.sum()
 
-        if duplicate_count>0:
+        if duplicate_count > 0:
             st.warning(f"Found {duplicate_count} duplicate rows ({(duplicate_count/len(df)*100):.2f}% of data)")
 
+            # Show duplicate rows
             if st.checkbox("Show Duplicate Rows"):
                 st.dataframe(df[duplicates])
 
-            col_duplicates={col:df[col].duplicated().sum() for col in df.columns}
+            # Analyze column-wise duplicates
+            col_duplicates = {col: df[col].duplicated().sum() for col in df.columns}
             col_dup_df = pd.DataFrame({
-                'Column' : col_duplicates.keys(),
+                'Column': col_duplicates.keys(),
                 'Duplicate Count': col_duplicates.values(),
                 'Duplicate Percentage': [v/len(df)*100 for v in col_duplicates.values()]
             }).sort_values('Duplicate Count', ascending=False)
@@ -737,8 +793,10 @@ def assess_data_quality(df: pd.DataFrame) -> None:
 
         consistency_issues = []
 
+        # Check numeric columns
         numeric_cols = df.select_dtypes(include=[np.number]).columns
         for col in numeric_cols:
+            # Check for values outside reasonable range
             q1 = df[col].quantile(0.25)
             q3 = df[col].quantile(0.75)
             iqr = q3 - q1
@@ -754,8 +812,10 @@ def assess_data_quality(df: pd.DataFrame) -> None:
                     'Details': f"Values outside range [{lower_bound:.2f}, {upper_bound:.2f}]"
                 })
 
+        # Check string columns
         string_cols = df.select_dtypes(include=['object']).columns
         for col in string_cols:
+            # Check for mixed case values
             if df[col].str.isupper().any() and df[col].str.islower().any():
                 consistency_issues.append({
                     'Column': col,
@@ -764,6 +824,7 @@ def assess_data_quality(df: pd.DataFrame) -> None:
                     'Details': 'Contains both upper and lower case values'
                 })
 
+            # Check for mixed data types
             numeric_conversion = pd.to_numeric(df[col], errors='coerce')
             if numeric_conversion.isnull().any() and not numeric_conversion.notnull().all():
                 consistency_issues.append({
@@ -784,12 +845,14 @@ def assess_data_quality(df: pd.DataFrame) -> None:
         if len(numeric_cols) > 0:
             col = st.selectbox("Select column for anomaly detection", numeric_cols, key="anomaly_col")
 
+            # Z-score based anomaly detection
             z_scores = np.abs(stats.zscore(df[col].dropna()))
             anomalies = df[col][z_scores > 3]
 
             if not anomalies.empty:
                 st.warning(f"Found {len(anomalies)} potential anomalies using Z-score method")
 
+                # Visualize anomalies
                 fig = go.Figure()
                 fig.add_trace(go.Box(y=df[col], name=col))
                 fig.add_trace(go.Scatter(
@@ -801,6 +864,7 @@ def assess_data_quality(df: pd.DataFrame) -> None:
                 ))
                 st.plotly_chart(fig, use_container_width=True)
 
+                # Show anomalous values
                 st.dataframe(anomalies)
             else:
                 st.success("No significant anomalies detected!")
@@ -830,6 +894,7 @@ def handle_query_response(response: dict, db_name: str, db_type: str, host: Opti
             with st.expander("Decision Log", expanded=False):
                 display_decision_log_widgets(decision_log)
 
+        # --- For PostgreSQL: Run EXPLAIN ANALYZE before executing query ---
         if db_type.lower() == 'postgresql':
             with DB_Config.get_connection(db_name, db_type, host, user, password) as conn:
                 if conn:
@@ -846,6 +911,7 @@ def handle_query_response(response: dict, db_name: str, db_type: str, host: Opti
                         st.error("Failed to run EXPLAIN ANALYZE.")
                         logger.exception(f"EXPLAIN ANALYZE failed: {ex}")
 
+        # --- Measure execution time ---
         start_time = time()
         sql_results = get_data(query, db_name, db_type, host, user, password)
         execution_time = time() - start_time
@@ -869,6 +935,7 @@ def handle_query_response(response: dict, db_name: str, db_type: str, host: Opti
             except (ValueError, TypeError):
                 pass
 
+        # --- Handling Large Datasets: Prompt sampling if needed ---
         if sql_results.shape[0] > 10000:
             sample_choice = st.checkbox("Large dataset detected. Sample data for visualization?", value=True)
             if sample_choice:
@@ -882,9 +949,11 @@ def handle_query_response(response: dict, db_name: str, db_type: str, host: Opti
         colored_header("Summary Statistics", color_name="blue-70", description="")
         display_summary_statistics(filtered_results)
 
+        # Add Advanced Analysis section
         colored_header("Advanced Analysis", color_name="blue-70", description="")
         perform_advanced_analysis(filtered_results)
 
+        # Add Data Quality Assessment section
         colored_header("Data Quality Assessment", color_name="blue-70", description="")
         assess_data_quality(filtered_results)
 
@@ -897,6 +966,7 @@ def handle_query_response(response: dict, db_name: str, db_type: str, host: Opti
         with st.expander("🔍 Query Performance Analysis", expanded=True):
             st.markdown("### Performance Metrics")
 
+            # Display execution metrics
             col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.metric("Execution Time", f"{performance_metrics['execution_time']:.3f}s")
@@ -907,6 +977,7 @@ def handle_query_response(response: dict, db_name: str, db_type: str, host: Opti
             with col4:
                 st.metric("Performance", performance_metrics['performance_class'])
 
+            # Display optimization suggestions
             if performance_metrics['suggestions']:
                 st.markdown("### Optimization Suggestions")
                 for suggestion in performance_metrics['suggestions']:
@@ -917,6 +988,7 @@ def handle_query_response(response: dict, db_name: str, db_type: str, host: Opti
                     else:
                         st.info(suggestion['message'])
 
+        # Add a colored header to separate the Visualization section from Summary Statistics
         colored_header("Visualization Section", color_name="blue-70", description="")
 
         if len(filtered_results.columns) >= 2:
@@ -924,6 +996,7 @@ def handle_query_response(response: dict, db_name: str, db_type: str, host: Opti
                 numerical_cols = filtered_results.select_dtypes(include=[np.number]).columns.tolist()
                 categorical_cols = filtered_results.select_dtypes(include=['object', 'category']).columns.tolist()
 
+                # Suggest default X and Y columns
                 suggested_x = numerical_cols[0] if numerical_cols else filtered_results.columns[0]
                 suggested_y = numerical_cols[1] if len(numerical_cols) > 1 else (filtered_results.columns[1] if len(filtered_results.columns) > 1 else filtered_results.columns[0])
 
@@ -1045,6 +1118,7 @@ def display_decision_log_widgets(decision_log: Dict) -> None:
     Each section of the decision log is displayed in its own tab with appropriate formatting
     and visual hierarchy. Only shows tabs that have data.
     """
+    # Create custom CSS for better tab styling
     st.markdown("""
         <style>
         .stTabs [data-baseweb="tab-list"] {
@@ -1056,6 +1130,7 @@ def display_decision_log_widgets(decision_log: Dict) -> None:
         </style>
     """, unsafe_allow_html=True)
 
+    # Define all possible tabs and their data requirements
     tab_data = [
         ("Input Analysis", bool(decision_log.get("query_input_details") or decision_log.get("preprocessing_steps"))),
         ("Paths", bool(decision_log.get("path_identification"))),
@@ -1068,16 +1143,20 @@ def display_decision_log_widgets(decision_log: Dict) -> None:
         ("Summary", bool(decision_log.get("final_summary") or decision_log.get("visualization_suggestion")))
     ]
 
+    # Filter out tabs with no data
     available_tabs = [tab for tab, has_data in tab_data if has_data]
 
     if not available_tabs:
         st.info("No decision log data available.")
         return
 
+    # Create tabs only for sections with data
     tabs = st.tabs(available_tabs)
 
+    # Create a mapping of tab names to their indices
     tab_indices = {name: idx for idx, name in enumerate(available_tabs)}
 
+    # Input Details Tab
     if "Input Analysis" in tab_indices:
         with tabs[tab_indices["Input Analysis"]]:
             st.markdown("### Query Input Details")
@@ -1089,6 +1168,7 @@ def display_decision_log_widgets(decision_log: Dict) -> None:
                 for step in preprocessing_steps:
                     st.markdown(f"```\n{step}\n```")
 
+    # Paths Tab
     if "Paths" in tab_indices:
         with tabs[tab_indices["Paths"]]:
             st.markdown("### Path Identification")
@@ -1113,6 +1193,7 @@ def display_decision_log_widgets(decision_log: Dict) -> None:
                         for cols in path['columns']:
                             st.markdown(f"- `{', '.join(cols)}`")
 
+    # Ambiguities Tab
     if "Ambiguities" in tab_indices:
         with tabs[tab_indices["Ambiguities"]]:
             st.markdown("### Ambiguity Analysis")
@@ -1120,6 +1201,7 @@ def display_decision_log_widgets(decision_log: Dict) -> None:
                 for ambiguity in ambiguities:
                     st.warning(ambiguity)
 
+    # Resolution Tab
     if "Resolution" in tab_indices:
         with tabs[tab_indices["Resolution"]]:
             st.markdown("### Resolution Criteria")
@@ -1128,6 +1210,7 @@ def display_decision_log_widgets(decision_log: Dict) -> None:
                     st.markdown(f"**{i}.** {criterion}")
                     st.divider()
 
+    # Chosen Path Tab
     if "Selected Path" in tab_indices:
         with tabs[tab_indices["Selected Path"]]:
             st.markdown("### Selected Tables and Columns")
@@ -1143,6 +1226,7 @@ def display_decision_log_widgets(decision_log: Dict) -> None:
                         st.markdown("#### Selection Rationale:")
                         st.info(item['reason'])
 
+    # SQL Query Tab
     if "SQL Query" in tab_indices:
         with tabs[tab_indices["SQL Query"]]:
             st.markdown("### Generated SQL Query")
@@ -1152,6 +1236,7 @@ def display_decision_log_widgets(decision_log: Dict) -> None:
                     st.write("Query copied to clipboard!")
                     st.session_state['clipboard'] = sql_query
 
+    # Alternatives Tab
     if "Alternatives" in tab_indices:
         with tabs[tab_indices["Alternatives"]]:
             st.markdown("### Alternative Approaches")
@@ -1160,6 +1245,7 @@ def display_decision_log_widgets(decision_log: Dict) -> None:
                     with st.expander(f"Alternative {i}", expanded=False):
                         st.markdown(alt)
 
+    # Feedback Tab
     if "Feedback" in tab_indices:
         with tabs[tab_indices["Feedback"]]:
             st.markdown("### Execution Feedback")
@@ -1172,6 +1258,7 @@ def display_decision_log_widgets(decision_log: Dict) -> None:
                     else:
                         st.success(item)
 
+    # Summary Tab
     if "Summary" in tab_indices:
         with tabs[tab_indices["Summary"]]:
             st.markdown("### Analysis Summary")
@@ -1194,6 +1281,7 @@ def analyze_query_performance(query: str, execution_time: float, row_count: int)
         "suggestions": []
     }
 
+    # Performance classification
     if execution_time < 0.1:
         performance_metrics["performance_class"] = "Excellent"
     elif execution_time < 0.5:
@@ -1209,6 +1297,7 @@ def analyze_query_performance(query: str, execution_time: float, row_count: int)
 
     return performance_metrics
 
+# Database Setup
 db_type = st.sidebar.selectbox("Select Database Type 🗄️", options=["SQLite", "PostgreSQL"])
 
 if db_type == "SQLite":
@@ -1293,6 +1382,7 @@ elif db_type == "PostgreSQL":
     else:
         st.info("🔒 Please fill in all PostgreSQL connection details to start.")
 
+# Query history
 with st.sidebar.expander(" Query History", expanded=False):
     if st.session_state.get("query_history"):
         st.write("### 📝 Saved Queries")
@@ -1338,4 +1428,3 @@ with st.sidebar.expander(" Query History", expanded=False):
 
     else:
         st.info("📭 No query history available.")
-                       
