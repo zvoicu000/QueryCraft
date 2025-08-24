@@ -6,3 +6,4 @@ temp_database.db
 sample_data.db
 .DS_Store
 sample.db
+venv/
